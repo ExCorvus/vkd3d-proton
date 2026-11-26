@@ -204,6 +204,7 @@ struct vkd3d_vulkan_info
     bool EXT_ray_tracing_invocation_reorder;
     bool EXT_shader_long_vector;
     bool EXT_shader_atomic_float;
+    bool EXT_shader_atomic_float2;
     /* AMD device extensions */
     bool AMD_buffer_marker;
     bool AMD_device_coherent_memory;
@@ -5469,6 +5470,7 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceShaderUntypedPointersFeaturesKHR untyped_pointers_features;
     VkPhysicalDeviceShaderAtomicFloat16VectorFeaturesNV shader_atomic_float16_vector_features;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT shader_atomic_float_features;
+    VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT shader_atomic_float2_features;
     VkPhysicalDeviceShaderAbortFeaturesKHR shader_abort_features;
     VkPhysicalDeviceShaderConstantDataFeaturesKHR shader_constant_data_features;
 
