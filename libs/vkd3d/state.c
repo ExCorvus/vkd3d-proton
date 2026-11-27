@@ -5421,6 +5421,19 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
     graphics->stage_count = 0;
     graphics->primitive_topology_type = desc->primitive_topology_type;
 
+    /* The Xbox Series graphics library also takes the topology numbers of a rectangle list and a quad list here.
+     * Both are rasterized as triangles, so the pipeline is a triangle pipeline. The draws themselves still need
+     * the topology to be turned into triangles when they are recorded. */
+    if (graphics->primitive_topology_type == (D3D12_PRIMITIVE_TOPOLOGY_TYPE)VKD3D_XBOX_PRIMITIVE_TOPOLOGY_RECTLIST ||
+            graphics->primitive_topology_type == (D3D12_PRIMITIVE_TOPOLOGY_TYPE)VKD3D_XBOX_PRIMITIVE_TOPOLOGY_QUADLIST)
+    {
+        WARN("Primitive topology type %#x (Xbox Series %s list) taken as a triangle pipeline.\n",
+                (unsigned int)graphics->primitive_topology_type,
+                graphics->primitive_topology_type == (D3D12_PRIMITIVE_TOPOLOGY_TYPE)VKD3D_XBOX_PRIMITIVE_TOPOLOGY_RECTLIST
+                ? "rectangle" : "quad");
+        graphics->primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    }
+
     state->pipeline_type = (graphics->stage_flags & VK_SHADER_STAGE_MESH_BIT_EXT)
             ? VKD3D_PIPELINE_TYPE_MESH_GRAPHICS
             : VKD3D_PIPELINE_TYPE_GRAPHICS;

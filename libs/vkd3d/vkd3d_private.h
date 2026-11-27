@@ -7026,6 +7026,11 @@ HRESULT vkd3d_set_vk_object_name(struct d3d12_device *device, uint64_t vk_object
 
 enum VkPrimitiveTopology vk_topology_from_d3d12_topology(D3D12_PRIMITIVE_TOPOLOGY topology);
 
+/* Topology numbers the Xbox Series graphics library takes besides the public ones. They match the GPU's own
+ * numbers for a rectangle list (three corners each, the fourth is made by the GPU) and a quad list. */
+#define VKD3D_XBOX_PRIMITIVE_TOPOLOGY_RECTLIST 0x11
+#define VKD3D_XBOX_PRIMITIVE_TOPOLOGY_QUADLIST 0x13
+
 static inline void vk_prepend_struct(void *header, void *structure)
 {
     VkBaseOutStructure *vk_header = header, *vk_structure = structure;
