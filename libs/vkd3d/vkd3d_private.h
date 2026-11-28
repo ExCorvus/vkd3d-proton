@@ -1324,6 +1324,8 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         const D3D12_RESOURCE_DESC1 *desc, const char *tag, VkBuffer *vk_buffer);
 HRESULT vkd3d_create_buffer_explicit_usage(struct d3d12_device *device,
         VkBufferUsageFlags2KHR vk_usage, VkDeviceSize vk_size, const char *tag, VkBuffer *vk_buffer);
+HRESULT vkd3d_create_buffer_explicit_usage_next(struct d3d12_device *device,
+        VkBufferUsageFlags2KHR vk_usage, VkDeviceSize vk_size, const char *tag, void *next, VkBuffer *vk_buffer);
 HRESULT vkd3d_get_image_allocation_info(struct d3d12_device *device,
         const D3D12_RESOURCE_DESC1 *desc,
         UINT num_castable_formats, const DXGI_FORMAT *castable_formats,
@@ -1649,6 +1651,23 @@ struct d3d12_descriptor_heap_set
     pfn_vkd3d_host_mapping_copy_template_single copy_template_single;
 };
 
+/* vkd3d-xbox: where descriptor heap memory comes from when the caller hands its own memory library over.
+ * allocate(context, bytes, heap type, heap flags) returns memory the CPU sees, aligned to 64 KiB, or NULL;
+ * release(context, address) gives it back. The memory library owns the memory; vkd3d never frees it. */
+typedef void *(*vkd3d_xbox_heap_allocate_fn)(void *context, uint64_t bytes, uint32_t type, uint32_t flags);
+typedef void (*vkd3d_xbox_heap_release_fn)(void *context, void *address);
+struct vkd3d_xbox_heap_memory
+{
+    vkd3d_xbox_heap_allocate_fn allocate;
+    vkd3d_xbox_heap_release_fn release;
+    void *context;
+};
+
+HRESULT vkd3d_import_internal_buffer_memory(struct d3d12_device *device, VkBuffer vk_buffer,
+        void *host_address, VkDeviceSize size, struct vkd3d_device_memory_allocation *allocation);
+HRESULT vkd3d_xbox_set_heap_memory(ID3D12Device *device, vkd3d_xbox_heap_allocate_fn allocate,
+        vkd3d_xbox_heap_release_fn release, void *context);
+
 struct d3d12_descriptor_heap
 {
     /* Used by special optimizations where we can take advantage of knowledge of the binding model
@@ -1672,6 +1691,8 @@ struct d3d12_descriptor_heap
         struct vkd3d_device_memory_allocation device_allocation;
         uint8_t *host_allocation;
         VkDeviceSize offsets[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
+        /* vkd3d-xbox: host_allocation came from the caller's memory library (struct vkd3d_xbox_heap_memory). */
+        bool from_memory_library;
     } descriptor_buffer;
 
     VkDescriptorPool vk_descriptor_pool;
@@ -5915,6 +5936,10 @@ struct d3d12_device
     IUnknown *parent;
     LUID adapter_luid;
     D3DKMT_HANDLE kmt_local;
+
+    /* Descriptor heap memory from the caller's memory library (vkd3d-xbox): when set, the CBV/SRV/UAV and sampler
+     * heaps are made on memory this function returns, as the Windows console's graphics library does. */
+    struct vkd3d_xbox_heap_memory xbox_heap_memory;
 
     struct vkd3d_private_store private_store;
     struct d3d_destruction_notifier destruction_notifier;
