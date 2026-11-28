@@ -11396,3 +11396,27 @@ struct vkd3d_instance *vkd3d_instance_from_device(ID3D12Device *device)
 
     return d3d12_device->vkd3d_instance;
 }
+
+/* vkd3d-xbox: hand vkd3d the caller's memory library for descriptor heaps (struct vkd3d_xbox_heap_memory). Only on
+ * the descriptor heap path (VK_EXT_descriptor_heap): there a heap shaders see is plain memory the GPU reads. */
+HRESULT vkd3d_xbox_set_heap_memory(ID3D12Device *iface, vkd3d_xbox_heap_allocate_fn allocate,
+        vkd3d_xbox_heap_release_fn release, void *context)
+{
+    struct d3d12_device *device = impl_from_ID3D12Device((d3d12_device_iface *)iface);
+
+    if (!device)
+        return E_INVALIDARG;
+
+    if (allocate && !d3d12_device_use_descriptor_heap(device))
+    {
+        ERR("vkd3d-xbox: descriptor heaps on the memory library's memory need the VK_EXT_descriptor_heap path, "
+                "which this device does not use.\n");
+        return E_NOTIMPL;
+    }
+
+    device->xbox_heap_memory.allocate = allocate;
+    device->xbox_heap_memory.release = release;
+    device->xbox_heap_memory.context = context;
+    INFO("vkd3d-xbox: descriptor heaps are %s.\n", allocate ? "made on the memory library's memory" : "vkd3d's own");
+    return S_OK;
+}
