@@ -2433,3 +2433,80 @@ HRESULT vkd3d_allocate_internal_buffer_memory(struct d3d12_device *device, VkBuf
 
     return hr;
 }
+
+/* vkd3d-xbox: the memory of an internal buffer is memory the caller already has (its memory library's), taken
+ * over as it is. Unlike vkd3d_import_host_memory there is no fallback to other memory: a second memory would be
+ * a second answer, so a failure is returned. The buffer must have been created for host-allocation import. */
+HRESULT vkd3d_import_internal_buffer_memory(struct d3d12_device *device, VkBuffer vk_buffer,
+        void *host_address, VkDeviceSize size, struct vkd3d_device_memory_allocation *allocation)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkMemoryHostPointerPropertiesEXT host_properties;
+    VkImportMemoryHostPointerInfoEXT import_info;
+    VkMemoryRequirements memory_requirements;
+    VkMemoryAllocateFlagsInfo flags_info;
+    VkBindBufferMemoryInfo bind_info;
+    uint32_t type_mask;
+    VkResult vr;
+    HRESULT hr;
+
+    memset(allocation, 0, sizeof(*allocation));
+
+    if (!device->vk_info.EXT_external_memory_host)
+    {
+        ERR("vkd3d-xbox: VK_EXT_external_memory_host is not enabled; cannot take over memory %p.\n", host_address);
+        return E_NOTIMPL;
+    }
+
+    host_properties.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
+    host_properties.pNext = NULL;
+    host_properties.memoryTypeBits = 0;
+    if ((vr = VK_CALL(vkGetMemoryHostPointerPropertiesEXT(device->vk_device,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host_address, &host_properties))))
+    {
+        ERR("vkd3d-xbox: the driver did not describe memory %p, vr %d.\n", host_address, vr);
+        return hresult_from_vk_result(vr);
+    }
+
+    VK_CALL(vkGetBufferMemoryRequirements(device->vk_device, vk_buffer, &memory_requirements));
+    type_mask = memory_requirements.memoryTypeBits & host_properties.memoryTypeBits;
+    if (!type_mask || memory_requirements.size > size)
+    {
+        ERR("vkd3d-xbox: memory %p (%"PRIu64" bytes) does not fit the buffer: types 0x%x / 0x%x, needs %"PRIu64" bytes.\n",
+                host_address, size, memory_requirements.memoryTypeBits, host_properties.memoryTypeBits,
+                memory_requirements.size);
+        return E_INVALIDARG;
+    }
+
+    flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    flags_info.pNext = NULL;
+    flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+    import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
+    import_info.pNext = &flags_info;
+    import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    import_info.pHostPointer = host_address;
+
+    if (FAILED(hr = vkd3d_try_allocate_device_memory(device, size, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+            type_mask, &import_info, false, allocation)))
+    {
+        ERR("vkd3d-xbox: the driver did not take over memory %p (%"PRIu64" bytes), hr %#x.\n",
+                host_address, size, (int)hr);
+        return hr;
+    }
+
+    bind_info.sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO;
+    bind_info.pNext = NULL;
+    bind_info.buffer = vk_buffer;
+    bind_info.memory = allocation->vk_memory;
+    bind_info.memoryOffset = 0;
+
+    if ((vr = VK_CALL(vkBindBufferMemory2(device->vk_device, 1, &bind_info))))
+    {
+        vkd3d_free_device_memory(device, allocation);
+        memset(allocation, 0, sizeof(*allocation));
+        return hresult_from_vk_result(vr);
+    }
+
+    return S_OK;
+}
