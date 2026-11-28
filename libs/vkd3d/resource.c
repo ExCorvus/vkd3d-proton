@@ -103,6 +103,14 @@ VkSampleCountFlagBits vk_samples_from_dxgi_sample_desc(const DXGI_SAMPLE_DESC *d
 HRESULT vkd3d_create_buffer_explicit_usage(struct d3d12_device *device,
         VkBufferUsageFlags2KHR vk_usage_flags, VkDeviceSize size, const char *tag, VkBuffer *vk_buffer)
 {
+    return vkd3d_create_buffer_explicit_usage_next(device, vk_usage_flags, size, tag, NULL, vk_buffer);
+}
+
+/* vkd3d-xbox: the same, with a structure chained to the buffer's creation (for a buffer whose memory is taken
+ * over from the caller: VkExternalMemoryBufferCreateInfo). */
+HRESULT vkd3d_create_buffer_explicit_usage_next(struct d3d12_device *device,
+        VkBufferUsageFlags2KHR vk_usage_flags, VkDeviceSize size, const char *tag, void *next, VkBuffer *vk_buffer)
+{
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     VkBufferUsageFlags2CreateInfoKHR flags2;
     VkBufferCreateInfo buffer_info;
@@ -110,6 +118,7 @@ HRESULT vkd3d_create_buffer_explicit_usage(struct d3d12_device *device,
 
     memset(&buffer_info, 0, sizeof(buffer_info));
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.pNext = next;
     buffer_info.size = size;
 
     memset(&flags2, 0, sizeof(flags2));
@@ -9262,6 +9271,97 @@ CONST_VTBL struct ID3D12DescriptorHeapVtbl d3d12_descriptor_heap_vtbl =
     d3d12_descriptor_heap_GetGPUDescriptorHandleForHeapStart,
 };
 
+/* vkd3d-xbox: the heap is made on memory from the caller's memory library, as the Windows console's graphics library
+ * does: one memory, which the CPU sees at the address the library gave and, for heaps shaders see, the GPU reads
+ * as the descriptor heap. The slots start at that address (so there must be no block of vkd3d's own in front of
+ * them); vkd3d's own pieces follow the slots, inside alloc_size. Nothing is cleared: the memory is the library's. */
+static HRESULT d3d12_descriptor_heap_create_on_library_memory(struct d3d12_descriptor_heap *descriptor_heap,
+        VkDeviceSize alloc_size)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &descriptor_heap->device->vk_procs;
+    struct d3d12_device *device = descriptor_heap->device;
+    const struct vkd3d_xbox_heap_memory *library = &device->xbox_heap_memory;
+    const bool shader_visible = !!(descriptor_heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+    VkExternalMemoryBufferCreateInfo external_info;
+    VkBufferUsageFlags2KHR usage;
+    uint8_t *memory;
+    HRESULT hr;
+
+    if (shader_visible && descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+            device->bindless_state.heap.redzone_size)
+    {
+        ERR("vkd3d-xbox: a heap on the memory library's memory needs its slots at the start, but vkd3d keeps %u bytes "
+                "of its own in front of them (heap robustness; VKD3D_CONFIG=no_default_heap_robustness turns it off).\n",
+                (unsigned int)device->bindless_state.heap.redzone_size);
+        return E_INVALIDARG;
+    }
+
+    /* The library is asked for exactly the slots (measured 2026-11-28, run 18:03: the program's own routine answers
+     * a request of the heap's size only, and the program stops when the heap starts elsewhere). vkd3d's own pieces
+     * that it would keep behind the slots stay out: the null descriptor is only for heap robustness (off), the
+     * reserved ranges are 0 on this driver, and with no descriptors to lend itself vkd3d takes its own existing way
+     * for its internal work ("Falling back to global heap"). The driver takes host memory over in whole pages; the
+     * library's memory is page-granular (run 17:02: a 2 KiB heap held in a 4 KiB region). */
+    {
+        const VkDeviceSize slots = (VkDeviceSize)descriptor_heap->desc.NumDescriptors *
+                (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ?
+                        device->bindless_state.sampler_size : device->bindless_state.cbv_srv_uav_size);
+        (void)alloc_size;
+        alloc_size = slots;
+    }
+
+    if (!(memory = library->allocate(library->context, alloc_size,
+            (uint32_t)descriptor_heap->desc.Type, (uint32_t)descriptor_heap->desc.Flags)))
+    {
+        ERR("vkd3d-xbox: the memory library gave no memory for a descriptor heap of %"PRIu64" bytes (type %u).\n",
+                alloc_size, descriptor_heap->desc.Type);
+        return E_OUTOFMEMORY;
+    }
+
+    descriptor_heap->descriptor_buffer.from_memory_library = true;
+    descriptor_heap->descriptor_buffer.host_allocation = memory;
+    descriptor_heap->descriptor_buffer.size = alloc_size;
+    descriptor_heap->descriptor_buffer.reserved_offset = alloc_size;
+    descriptor_heap->meta_descriptor_index_count = 0;
+
+    if (shader_visible)
+    {
+        usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_DESCRIPTOR_HEAP_BIT_EXT;
+        if (device->bindless_state.heap.redzone_size)
+            usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+        memset(&external_info, 0, sizeof(external_info));
+        external_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+        external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+
+        if (FAILED(hr = vkd3d_create_buffer_explicit_usage_next(device, usage, align64(alloc_size, 0x1000),
+                "descriptor-buffer", &external_info, &descriptor_heap->descriptor_buffer.vk_buffer)))
+            goto fail;
+
+        if (FAILED(hr = vkd3d_import_internal_buffer_memory(device, descriptor_heap->descriptor_buffer.vk_buffer,
+                memory, align64(alloc_size, 0x1000), &descriptor_heap->descriptor_buffer.device_allocation)))
+            goto fail;
+
+        descriptor_heap->descriptor_buffer.va =
+                vkd3d_get_buffer_device_address(device, descriptor_heap->descriptor_buffer.vk_buffer);
+    }
+
+    INFO("vkd3d-xbox: descriptor heap type %u (%u descriptors, flags %#x) on the memory library's memory %p, "
+            "%"PRIu64" bytes%s.\n", descriptor_heap->desc.Type, descriptor_heap->desc.NumDescriptors,
+            descriptor_heap->desc.Flags, (void *)memory, alloc_size,
+            shader_visible ? ", taken over as the GPU's descriptor heap" : "");
+    return S_OK;
+
+fail:
+    VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
+    descriptor_heap->descriptor_buffer.vk_buffer = VK_NULL_HANDLE;
+    if (library->release)
+        library->release(library->context, memory);
+    descriptor_heap->descriptor_buffer.host_allocation = NULL;
+    descriptor_heap->descriptor_buffer.from_memory_library = false;
+    return hr;
+}
+
 static HRESULT d3d12_descriptor_heap_create_descriptor_heap(struct d3d12_descriptor_heap *descriptor_heap)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &descriptor_heap->device->vk_procs;
@@ -9353,6 +9453,9 @@ static HRESULT d3d12_descriptor_heap_create_descriptor_heap(struct d3d12_descrip
             alloc_size += device->device_info.descriptor_heap_properties.minSamplerHeapReservedRangeWithEmbedded;
         }
     }
+
+    if (device->xbox_heap_memory.allocate && (descriptor_heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+        return d3d12_descriptor_heap_create_on_library_memory(descriptor_heap, alloc_size);
 
     if (descriptor_heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
     {
@@ -10535,17 +10638,30 @@ void d3d12_descriptor_heap_cleanup(struct d3d12_descriptor_heap *descriptor_heap
 
     VK_CALL(vkDestroyDescriptorPool(device->vk_device, descriptor_heap->vk_descriptor_pool, NULL));
 
-    if (!descriptor_heap->descriptor_buffer.device_allocation.vk_memory)
-        vkd3d_free_aligned(descriptor_heap->descriptor_buffer.host_allocation);
-    vkd3d_free_device_memory(device, &descriptor_heap->descriptor_buffer.device_allocation);
-    VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
+    if (descriptor_heap->descriptor_buffer.from_memory_library)
+    {
+        /* vkd3d-xbox: let go of the GPU's view of the memory first, then hand the memory back to its library. */
+        VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
+        vkd3d_free_device_memory(device, &descriptor_heap->descriptor_buffer.device_allocation);
+        if (device->xbox_heap_memory.release)
+            device->xbox_heap_memory.release(device->xbox_heap_memory.context,
+                    descriptor_heap->descriptor_buffer.host_allocation);
+    }
+    else
+    {
+        if (!descriptor_heap->descriptor_buffer.device_allocation.vk_memory)
+            vkd3d_free_aligned(descriptor_heap->descriptor_buffer.host_allocation);
+        vkd3d_free_device_memory(device, &descriptor_heap->descriptor_buffer.device_allocation);
+        VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
+    }
 
     if (d3d12_device_use_descriptor_heap(device))
     {
         if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
             (descriptor_heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
         {
-            if (descriptor_heap->meta_descriptor_index_count != VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT)
+            if (!descriptor_heap->descriptor_buffer.from_memory_library &&
+                    descriptor_heap->meta_descriptor_index_count != VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT)
             {
                 FIXME("Mismatch in meta descriptors. Expected VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT, got %zu.\n",
                         descriptor_heap->meta_descriptor_index_count);
