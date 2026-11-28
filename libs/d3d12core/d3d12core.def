@@ -2,4 +2,5 @@ LIBRARY d3d12core.dll
 
 EXPORTS
     D3D12GetInterface
+    vkd3d_xbox_set_descriptor_heap_memory
     D3D12SDKVersion DATA PRIVATE
