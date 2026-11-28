@@ -1,3 +1,24 @@
+# vkd3d-xbox
+
+## How this fork works
+
+This is vkd3d-proton with additions for [whibwhi-own](https://github.com/ExCorvus/whibwhi-own) (ExCorvus), a shell
+that runs an unmodified Xbox Series program on a Windows PC. The program calls Direct3D 12; the weave passes those
+calls on to this library, which carries them out on Vulkan, as vkd3d-proton does.
+
+- **What comes back stays D3D12.** Inside, D3D12 becomes Vulkan; what the program gets back (devices, heaps,
+  pipelines, results) has the D3D12 shape it asked for.
+- **Shaders, two ways in.**
+  - A PC shader (DXBC, or DXIL with its LLVM code) goes the usual way: vkd3d-shader or dxil-spirv turns it into
+    SPIR-V. The dxil-spirv fork ([ExCorvus/dxil-spirv-xbox](https://github.com/ExCorvus/dxil-spirv-xbox)) also
+    reads the functions the Xbox shader compiler puts into such shaders.
+  - An Xbox shader carries no LLVM code: its DXIL part holds the GPU's finished machine code instead. The weave
+    reads that code and writes SPIR-V itself; this fork takes that SPIR-V at the point where it would have made
+    SPIR-V from DXIL. *(Planned, not built yet.)*
+- **Descriptor heaps over existing memory:** a heap can be opened over memory the program already owns.
+- **Rectangle and quad lists:** the Xbox's rectangle and quad list topology types are taken as triangle pipelines.
+
+Licence: LGPL-2.1, as vkd3d-proton. All credit for vkd3d-proton goes to its authors; their README follows.
 # vkd3d-proton
 
 vkd3d-proton is a fork of VKD3D, which aims to implement the full Direct3D 12 API on top of Vulkan.
