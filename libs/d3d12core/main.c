@@ -1350,6 +1350,16 @@ HRESULT WINAPI DLLEXPORT D3D12GetInterface(REFCLSID rcslid, REFIID iid, void **d
     return d3d12core_D3D12GetInterface(rcslid, iid, debug);
 }
 
+/* vkd3d-xbox: descriptor heaps on the caller's memory library (libs/vkd3d/device.c). */
+HRESULT vkd3d_xbox_set_heap_memory(ID3D12Device *device, void *(*allocate)(void *, uint64_t, uint32_t, uint32_t),
+        void (*release)(void *, void *), void *context);
+
+HRESULT WINAPI DLLEXPORT vkd3d_xbox_set_descriptor_heap_memory(ID3D12Device *device,
+        void *(*allocate)(void *, uint64_t, uint32_t, uint32_t), void (*release)(void *, void *), void *context)
+{
+    return vkd3d_xbox_set_heap_memory(device, allocate, release, context);
+}
+
 /* Just expose the latest stable AgilitySDK version.
  * This is actually exported as a UINT and not a function it seems. */
 DLLEXPORT const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
